@@ -1,0 +1,171 @@
+#include <AccelStepper.h>
+#include "DFRobot_ESP_PH.h"
+#include "EEPROM.h"
+#include <TFT_eSPI.h> 
+#include <SPI.h>
+
+DFRobot_ESP_PH ph;
+#define ESPADC 4096.0   
+#define ESPVOLTAGE 3300 
+#define PH_PIN 35       
+#define MOTOR_UPDATE_INTERVAL 1000 // Aktualizacja silnika co 5 sekund
+
+#define TFT_W 160 // Szerokość wyświetlacza
+#define TFT_H 128 // Wysokość wyświetlacza
+
+
+#define DATA_POINTS 144 // 24 godziny * 6 pomiarów na godzinę
+float phDataPoints[DATA_POINTS];
+int dataIndex = 0;
+
+float voltage, phValue, temperature = 25;
+float phReadings[30];
+int phReadingsIndex = 0;
+float phAverage = 0;
+unsigned long lastUpdateTime = 0;
+const long updateInterval = 1000; // 1 second
+
+TFT_eSPI myGLCD = TFT_eSPI();
+
+AccelStepper stepper(1, 19, 18);
+
+const float targetPH = 8.15;
+
+
+//silnik
+bool motorRunning = false;
+int motorDirection = 0;
+unsigned long lastMotorUpdateTime = 0;
+
+//graf
+unsigned long lastDataUpdateTime = 0;
+const long dataUpdateInterval = 600000; // 10 minut
+
+//const long dataUpdateInterval = 1000; // 1 sekunda
+
+
+void setup() {
+  Serial.begin(115200);
+  EEPROM.begin(32);
+  ph.begin();
+  myGLCD.init();
+  myGLCD.setRotation(3);
+  myGLCD.fillScreen(TFT_BLACK);
+  pinMode(22, OUTPUT);
+  pinMode(23, OUTPUT);
+  digitalWrite(23, HIGH);
+  digitalWrite(22, HIGH);
+  stepper.setMaxSpeed(2000);
+  stepper.setSpeed(80);
+
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  //srednie ph
+  if (currentMillis - lastUpdateTime >= updateInterval) {
+    lastUpdateTime = currentMillis;
+    updatePHReading();
+  }
+
+
+//ph co 10 minut
+    if (currentMillis - lastDataUpdateTime >= dataUpdateInterval) {
+        lastDataUpdateTime = currentMillis;
+       // updateMinuteAverage(); // Aktualizacja danych minutowych
+        updateDataBuffer(); // Aktualizacja bufora danych i rysowanie wykresu
+    }
+
+//silnik
+  if (currentMillis - lastMotorUpdateTime >= MOTOR_UPDATE_INTERVAL) {
+    lastMotorUpdateTime = currentMillis;
+    controlStepper(phAverage);
+  }
+
+    stepper.runSpeed(); // Ensure this is called as often as possible
+}
+
+void updatePHReading() {
+  voltage = analogRead(PH_PIN) / ESPADC * ESPVOLTAGE;
+  phValue = ph.readPH(voltage, temperature);
+  phReadings[phReadingsIndex++] = phValue;
+  if (phReadingsIndex >= 30) phReadingsIndex = 0;
+  calculatePHAverage();
+ // myGLCD.fillScreen(TFT_BLACK);
+  myGLCD.setCursor(0, 0);
+  myGLCD.print("Avg pH last 30 sec: ");
+  myGLCD.println(phAverage, 2);
+}
+
+
+
+void calculatePHAverage() {
+  phAverage = 0;
+  for (int i = 0; i < 30; i++) {
+    phAverage += phReadings[i];
+  }
+  phAverage /= 30;
+}
+
+void controlStepper(float phAverage) {
+Serial.println("minuteAvgPH: " + String(phAverage)+"targetPH" +  targetPH + "motorDirection" + motorDirection  );
+      
+  if (phAverage < targetPH && motorDirection != 1) {
+
+    stepper.setSpeed(250);
+    motorDirection = 1;
+    motorRunning = true;
+  } else if (phAverage > targetPH && motorDirection != -1) {
+    
+
+    stepper.setSpeed(0);
+    motorDirection = -1;
+    motorRunning = true;
+  } else if (fabs(phAverage - targetPH) < 0.01) {
+    stepper.setSpeed(10);
+    
+
+  //  stepper.stop();
+    motorDirection = 0;
+    motorRunning = false;
+  }
+
+}
+
+void updateDataBuffer() {
+    phDataPoints[dataIndex++] = phAverage;
+    if (dataIndex >= DATA_POINTS) dataIndex = 0; // Zapętlenie bufora
+    drawGraph(); // Funkcja rysująca graf na wyświetlaczu
+}
+void drawGraph() {
+    int graphHeight = 100;
+    int yOffset = 20;
+    float maxPH = 10.0; // Maksymalna skala pH na wykresie
+    float minPH = 4.0;  // Minimalna skala pH na wykresie
+
+    // Rysowanie pionowych linii godzinnych
+    for (int i = 0; i <= 24; i++) {
+        int x = (TFT_W * i) / 24;
+        myGLCD.drawFastVLine(x, yOffset, graphHeight, TFT_GREEN);
+    }
+
+    // Rysowanie linii referencyjnych
+    int greenLine = yOffset + graphHeight - (graphHeight * (7.0 - minPH) / (maxPH - minPH));
+    int redLine = yOffset + graphHeight - (graphHeight * (8.5 - minPH) / (maxPH - minPH));
+    myGLCD.drawFastHLine(0, greenLine, TFT_W, TFT_BLUE);
+    myGLCD.drawFastHLine(0, redLine, TFT_W, TFT_RED);
+
+    // Rysowanie wykresu pH
+    myGLCD.drawFastVLine((TFT_W * (dataIndex - 1) / DATA_POINTS), yOffset, graphHeight, TFT_BLACK); // Czyszczenie starej linii
+    for (int i = 0; i < DATA_POINTS - 1; i++) {
+        int x1 = (TFT_W * i) / DATA_POINTS;
+        int y1 = yOffset + graphHeight - (graphHeight * (phDataPoints[i] - minPH) / (maxPH - minPH));
+        int x2 = (TFT_W * (i + 1)) / DATA_POINTS;
+        int y2 = yOffset + graphHeight - (graphHeight * (phDataPoints[i + 1] - minPH) / (maxPH - minPH));
+        myGLCD.drawLine(x1, y1, x2, y2, TFT_WHITE);
+    }
+}
+
+
+
